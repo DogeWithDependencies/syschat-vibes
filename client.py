@@ -1,7 +1,7 @@
 import socket
 import threading
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, simpledialog
 
 HOST = "127.0.0.1"
 PORT = 12345
@@ -12,13 +12,8 @@ class ChatClient:
         self.root.title("Chat Client")
         
         self.username = None
-        try:
-            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client_socket.connect((HOST, PORT))
-        except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect to server: {e}")
-            self.root.destroy()
-            return
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.connect((HOST, PORT))
         
         self.create_login_screen()
     
@@ -44,6 +39,14 @@ class ChatClient:
         self.msg_entry.pack(fill=tk.X, padx=10, pady=5)
         
         tk.Button(self.root, text="Send", command=self.send_message).pack()
+        tk.Button(self.root, text="Create Group", command=self.create_group).pack()
+        tk.Button(self.root, text="Join Group", command=self.join_group).pack()
+        tk.Button(self.root, text="User List", command=self.get_user_list).pack()
+        
+        tk.Label(self.root, text="Chat Target (User/Group):").pack()
+        self.chat_target_entry = tk.Entry(self.root)
+        self.chat_target_entry.pack()
+        self.chat_target_entry.insert(0, "Global")
         
         threading.Thread(target=self.receive_messages, daemon=True).start()
     
@@ -53,23 +56,23 @@ class ChatClient:
     
     def send_message(self):
         message = self.msg_entry.get().strip()
-        if message:
-            try:
-                self.client_socket.send(f"MSG:{message}".encode("utf-8"))
-                self.msg_entry.delete(0, tk.END)
-            except:
-                messagebox.showerror("Error", "Failed to send message")
+        target = self.chat_target_entry.get().strip()
+        if message and target:
+            self.client_socket.send(f"MSG:{target}:{message}".encode("utf-8"))
+            self.msg_entry.delete(0, tk.END)
     
     def receive_messages(self):
         while True:
             try:
                 message = self.client_socket.recv(1024).decode("utf-8")
-                if not message:
-                    break
-                self.chat_area.config(state='normal')
-                self.chat_area.insert(tk.END, message + "\n")
-                self.chat_area.config(state='disabled')
-                self.chat_area.yview(tk.END)
+                if message.startswith("USERLIST:"):
+                    users = message.split(":", 1)[1]
+                    messagebox.showinfo("Users Online", users)
+                else:
+                    self.chat_area.config(state='normal')
+                    self.chat_area.insert(tk.END, message + "\n")
+                    self.chat_area.config(state='disabled')
+                    self.chat_area.yview(tk.END)
             except:
                 break
     
@@ -77,35 +80,52 @@ class ChatClient:
         username = self.username_entry.get().strip()
         password = self.password_entry.get().strip()
         if not username or not password:
-            messagebox.showerror("Login Failed", "Username and password cannot be empty")
+            messagebox.showerror("Login Failed", "Fields cannot be empty.")
             return
-        try:
-            self.client_socket.send(f"LOGIN:{username}:{password}".encode("utf-8"))
-            response = self.client_socket.recv(1024).decode("utf-8")
-            if response == "LOGIN_SUCCESS":
-                self.username = username
-                self.create_chat_screen()
-            else:
-                messagebox.showerror("Login Failed", "Invalid credentials")
-        except:
-            messagebox.showerror("Error", "Failed to communicate with server")
+        self.client_socket.send(f"LOGIN:{username}:{password}".encode("utf-8"))
+        response = self.client_socket.recv(1024).decode("utf-8")
+        if response == "LOGIN_SUCCESS":
+            self.username = username
+            self.create_chat_screen()
+        else:
+            messagebox.showerror("Login Failed", "Invalid credentials")
     
     def register(self):
         username = self.username_entry.get().strip()
         password = self.password_entry.get().strip()
         if not username or not password:
-            messagebox.showerror("Registration Failed", "Username and password cannot be empty")
+            messagebox.showerror("Registration Failed", "Username and password cannot be empty.")
             return
-        try:
-            self.client_socket.send(f"REGISTER:{username}:{password}".encode("utf-8"))
+        self.client_socket.send(f"REGISTER:{username}:{password}".encode("utf-8"))
+        response = self.client_socket.recv(1024).decode("utf-8")
+        if response == "REGISTER_SUCCESS":
+            messagebox.showinfo("Registration Successful", "You can now log in")
+        else:
+            messagebox.showerror("Registration Failed", "Username already exists")
+    
+    def create_group(self):
+        group_name = simpledialog.askstring("Create Group", "Enter group name:")
+        if group_name:
+            self.client_socket.send(f"CREATE_GROUP:{group_name}".encode("utf-8"))
             response = self.client_socket.recv(1024).decode("utf-8")
-            if response == "REGISTER_SUCCESS":
-                messagebox.showinfo("Registration Successful", "You can now log in")
+            if response.startswith("GROUP_CREATED"):
+                messagebox.showinfo("Success", f"Group '{group_name}' created.")
             else:
-                messagebox.showerror("Registration Failed", "Username already exists")
-        except:
-            messagebox.showerror("Error", "Failed to communicate with server")
-
+                messagebox.showerror("Error", "Group creation failed.")
+    
+    def join_group(self):
+        group_name = simpledialog.askstring("Join Group", "Enter group name:")
+        if group_name:
+            self.client_socket.send(f"JOIN_GROUP:{group_name}".encode("utf-8"))
+            response = self.client_socket.recv(1024).decode("utf-8")
+            if response.startswith("JOINED_GROUP"):
+                messagebox.showinfo("Success", f"Joined group '{group_name}'.")
+            else:
+                messagebox.showerror("Error", "Group does not exist.")
+    
+    def get_user_list(self):
+        self.client_socket.send("USERLIST".encode("utf-8"))
+        
 if __name__ == "__main__":
     root = tk.Tk()
     client = ChatClient(root)
