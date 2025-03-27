@@ -50,8 +50,7 @@ def handle_client(client, addr):
                             username = user
                             clients[username] = client
                             client.send("LOGIN_SUCCESS".encode("utf-8"))
-                            send_user_list()
-                            send_group_list()
+                            send_groups_to_all_clients()  # Send the updated group list to all clients
                 else:
                     client.send("LOGIN_FAIL".encode("utf-8"))
             elif msg.startswith("MSG:") and username:
@@ -67,12 +66,11 @@ def handle_client(client, addr):
                 _, group_name = msg.split(":")
                 create_group(group_name, username)
                 client.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
-                send_group_list()
+                send_groups_to_all_clients()  # Notify all clients of the new group
             elif msg.startswith("JOIN_GROUP:") and username:
                 _, group_name = msg.split(":")
                 join_group(group_name, username)
                 client.send(f"JOINED_GROUP:{group_name}".encode("utf-8"))
-                send_group_list()
     except Exception as e:
         print(f"Error handling client {addr}: {e}")
     finally:
@@ -81,7 +79,10 @@ def handle_client(client, addr):
             with clients_lock:
                 del clients[username]
         client.close()
-        send_user_list()
+
+def send_groups_to_all_clients():
+    group_list = ":".join(groups.keys())
+    broadcast(f"UPDATE_GROUPS:{group_list}")
 
 def broadcast(message):
     with clients_lock:
@@ -116,22 +117,6 @@ def join_group(group_name, username):
     if group_name in groups:
         if username not in groups[group_name]:
             groups[group_name].append(username)
-
-def send_user_list():
-    user_list = ",".join(clients.keys())
-    for client in clients.values():
-        try:
-            client.send(f"USER_LIST:{user_list}".encode("utf-8"))
-        except Exception as e:
-            print(f"Error sending user list: {e}")
-
-def send_group_list():
-    group_list = ",".join(groups.keys())
-    for client in clients.values():
-        try:
-            client.send(f"GROUP_LIST:{group_list}".encode("utf-8"))
-        except Exception as e:
-            print(f"Error sending group list: {e}")
 
 def register_user(username, password):
     try:
