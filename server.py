@@ -34,10 +34,9 @@ def init_db():
 init_db()
 
 # Server setup
-HOST = "0.0.0.0"
+HOST = "0.0.0.0"  # Can be replaced with the actual IP or host
 PORT = 12345
-clients = {}
-groups = {}
+clients = {}  # This will store active client connections
 server_socket = None
 
 def handle_client(client, addr):
@@ -58,7 +57,7 @@ def handle_client(client, addr):
                 _, user, pwd = msg.split(":")
                 if check_login(user, pwd):
                     username = user
-                    clients[username] = client
+                    clients[username] = client  # Add the client to the active user list
                     client.send("LOGIN_SUCCESS".encode("utf-8"))
                 else:
                     client.send("LOGIN_FAIL".encode("utf-8"))
@@ -77,7 +76,7 @@ def handle_client(client, addr):
                 join_group(group_name, username)
                 client.send(f"JOINED_GROUP:{group_name}".encode("utf-8"))
             elif msg.startswith("USERLIST:"):
-                users = get_user_list()
+                users = get_user_list()  # Get list of usernames from clients dictionary
                 client.send(f"USERLIST:{','.join(users)}".encode("utf-8"))
             elif msg.startswith("STOP_SERVER:"):
                 shutdown_server(client)
@@ -86,7 +85,7 @@ def handle_client(client, addr):
         print(f"Error: {e}")
     finally:
         if username in clients:
-            del clients[username]
+            del clients[username]  # Remove the user from the active list on disconnect
         client.close()
 
 def register_user(username, password):
@@ -140,12 +139,8 @@ def join_group(group_name, username):
     conn.close()
 
 def get_user_list():
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("SELECT username FROM users")
-    users = [user[0] for user in c.fetchall()]
-    conn.close()
-    return users
+    # Return a list of all users currently connected, from the `clients` dictionary
+    return list(clients.keys())
 
 def shutdown_server(client):
     """Shutdown the server and close all connections."""
@@ -153,6 +148,7 @@ def shutdown_server(client):
     print("Server is shutting down...")
     for c in clients.values():
         try:
+            c.send("Server is shutting down. Disconnecting...".encode("utf-8"))
             c.close()
         except:
             pass
@@ -168,10 +164,22 @@ def start_server():
     server_socket.listen(5)
     print(f"Server running on {HOST}:{PORT}...")
     
+    # Server CLI for graceful shutdown
+    threading.Thread(target=server_cli, daemon=True).start()
+
     while True:
         client, addr = server_socket.accept()
         print(f"Connection from {addr}")
         threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+
+def server_cli():
+    """Handle server CLI input to gracefully shut down the server."""
+    while True:
+        cmd = input("Server CLI (type 'shutdown' to stop server): ").strip()
+        if cmd.lower() == 'shutdown':
+            print("Shutting down server...")
+            shutdown_server(None)
+            break
 
 if __name__ == "__main__":
     start_server()
