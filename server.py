@@ -34,7 +34,7 @@ def init_db():
 init_db()
 
 # Server setup
-HOST = "0.0.0.0"  # Can be replaced with the actual IP or host
+HOST = "0.0.0.0"
 PORT = 12345
 clients = {}  # This will store active client connections
 server_socket = None
@@ -56,17 +56,24 @@ def handle_client(client, addr):
             elif msg.startswith("LOGIN:"):
                 _, user, pwd = msg.split(":")
                 if check_login(user, pwd):
-                    username = user
-                    clients[username] = client  # Add the client to the active user list
-                    client.send("LOGIN_SUCCESS".encode("utf-8"))
+                    if user in clients:
+                        client.send("LOGIN_FAIL:ALREADY_LOGGED_IN".encode("utf-8"))
+                    else:
+                        username = user
+                        clients[username] = client  # Add the client to the active user list
+                        client.send("LOGIN_SUCCESS".encode("utf-8"))
                 else:
                     client.send("LOGIN_FAIL".encode("utf-8"))
             elif msg.startswith("MSG:") and username:
                 _, target, content = msg.split(":", 2)
                 if target == "Global":
                     broadcast(f"{username}: {content}")
-                else:
-                    send_dm(username, target, content)
+                elif target.startswith("DM:"):
+                    target_user = target[3:]
+                    send_dm(username, target_user, content)
+                elif target.startswith("GROUP:"):
+                    group_name = target[6:]
+                    send_group_message(group_name, username, content)
             elif msg.startswith("CREATE_GROUP:") and username:
                 _, group_name = msg.split(":", 1)
                 create_group(group_name, username)
@@ -81,8 +88,10 @@ def handle_client(client, addr):
             elif msg.startswith("STOP_SERVER:"):
                 shutdown_server(client)
                 break
+    except ConnectionResetError:
+        print(f"Connection reset by {addr}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error handling client {addr}: {e}")
     finally:
         if username in clients:
             del clients[username]  # Remove the user from the active list on disconnect
@@ -115,8 +124,29 @@ def broadcast(message):
             pass
 
 def send_dm(from_user, to_user, message):
+    """Send a direct message to a user."""
     if to_user in clients:
         clients[to_user].send(f"DM from {from_user}: {message}".encode("utf-8"))
+    else:
+        print(f"{to_user} is not online!")
+
+def send_group_message(group_name, from_user, message):
+    """Send a message to a group."""
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("""
+    SELECT username FROM group_members
+    INNER JOIN groups ON groups.id = group_members.group_id
+    WHERE groups.group_name = ? AND username != ?
+    """, (group_name, from_user))
+    members = c.fetchall()
+    conn.close()
+
+    if members:
+        for member in members:
+            member_name = member[0]
+            if member_name in clients:
+                clients[member_name].send(f"Group message from {from_user} in {group_name}: {message}".encode("utf-8"))
 
 def create_group(group_name, creator):
     conn = sqlite3.connect("users.db")
