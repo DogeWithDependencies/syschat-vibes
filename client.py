@@ -12,8 +12,13 @@ class ChatClient:
         self.root.title("Chat Client")
         
         self.username = None
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.connect((HOST, PORT))
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((HOST, PORT))
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to connect to server: {e}")
+            self.root.destroy()
+            return
         
         self.create_login_screen()
     
@@ -47,15 +52,20 @@ class ChatClient:
             widget.destroy()
     
     def send_message(self):
-        message = self.msg_entry.get()
+        message = self.msg_entry.get().strip()
         if message:
-            self.client_socket.send(f"MSG:{message}".encode("utf-8"))
-            self.msg_entry.delete(0, tk.END)
+            try:
+                self.client_socket.send(f"MSG:{message}".encode("utf-8"))
+                self.msg_entry.delete(0, tk.END)
+            except:
+                messagebox.showerror("Error", "Failed to send message")
     
     def receive_messages(self):
         while True:
             try:
                 message = self.client_socket.recv(1024).decode("utf-8")
+                if not message:
+                    break
                 self.chat_area.config(state='normal')
                 self.chat_area.insert(tk.END, message + "\n")
                 self.chat_area.config(state='disabled')
@@ -64,25 +74,37 @@ class ChatClient:
                 break
     
     def login(self):
-        username = self.username_entry.get()
-        password = self.password_entry.get()
-        self.client_socket.send(f"LOGIN:{username}:{password}".encode("utf-8"))
-        response = self.client_socket.recv(1024).decode("utf-8")
-        if response == "LOGIN_SUCCESS":
-            self.username = username
-            self.create_chat_screen()
-        else:
-            messagebox.showerror("Login Failed", "Invalid credentials")
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not username or not password:
+            messagebox.showerror("Login Failed", "Username and password cannot be empty")
+            return
+        try:
+            self.client_socket.send(f"LOGIN:{username}:{password}".encode("utf-8"))
+            response = self.client_socket.recv(1024).decode("utf-8")
+            if response == "LOGIN_SUCCESS":
+                self.username = username
+                self.create_chat_screen()
+            else:
+                messagebox.showerror("Login Failed", "Invalid credentials")
+        except:
+            messagebox.showerror("Error", "Failed to communicate with server")
     
     def register(self):
-        username = self.username_entry.get()
-        password = self.password_entry.get()
-        self.client_socket.send(f"REGISTER:{username}:{password}".encode("utf-8"))
-        response = self.client_socket.recv(1024).decode("utf-8")
-        if response == "REGISTER_SUCCESS":
-            messagebox.showinfo("Registration Successful", "You can now log in")
-        else:
-            messagebox.showerror("Registration Failed", "Username already exists")
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not username or not password:
+            messagebox.showerror("Registration Failed", "Username and password cannot be empty")
+            return
+        try:
+            self.client_socket.send(f"REGISTER:{username}:{password}".encode("utf-8"))
+            response = self.client_socket.recv(1024).decode("utf-8")
+            if response == "REGISTER_SUCCESS":
+                messagebox.showinfo("Registration Successful", "You can now log in")
+            else:
+                messagebox.showerror("Registration Failed", "Username already exists")
+        except:
+            messagebox.showerror("Error", "Failed to communicate with server")
 
 if __name__ == "__main__":
     root = tk.Tk()
