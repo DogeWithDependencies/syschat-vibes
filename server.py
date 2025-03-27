@@ -1,6 +1,7 @@
 import socket
 import threading
 import sqlite3
+import traceback
 
 # Database setup
 def init_db():
@@ -22,7 +23,8 @@ init_db()
 HOST = "0.0.0.0"
 PORT = 12345
 clients = {}
-groups = {}
+groups = {"Global": []}  # Initialize Global group by default
+active_users = set()
 
 # Thread Lock for safe shared access
 clients_lock = threading.Lock()
@@ -34,51 +36,87 @@ def handle_client(client, addr):
             msg = client.recv(1024).decode("utf-8")
             if not msg:  # Client disconnected
                 break
+            
+            print(f"Received message: {msg}")  # Debugging print
+            
             if msg.startswith("REGISTER:"):
                 _, user, pwd = msg.split(":")
                 if register_user(user, pwd):
                     client.send("REGISTER_SUCCESS".encode("utf-8"))
                 else:
                     client.send("REGISTER_FAIL".encode("utf-8"))
+            
             elif msg.startswith("LOGIN:"):
                 _, user, pwd = msg.split(":")
-                if check_login(user, pwd):
-                    with clients_lock:  # Lock to prevent multiple logins
-                        if user in clients:
+                login_result = check_login(user, pwd)
+                
+                if login_result:
+                    with clients_lock:
+                        if user in active_users:
                             client.send("ALREADY_LOGGED_IN".encode("utf-8"))
                         else:
                             username = user
                             clients[username] = client
+                            active_users.add(username)
+                            # Add user to Global group by default
+                            if "Global" not in groups:
+                                groups["Global"] = []
+                            if username not in groups["Global"]:
+                                groups["Global"].append(username)
+                            
                             client.send("LOGIN_SUCCESS".encode("utf-8"))
-                            send_groups_to_all_clients()  # Send the updated group list to all clients
+                            broadcast(f"Server: {username} has joined the chat")
+                            send_groups_to_client(client)
                 else:
                     client.send("LOGIN_FAIL".encode("utf-8"))
+            
             elif msg.startswith("MSG:") and username:
-                _, recipient_type, recipient, content = msg.split(":", 3)
-                if recipient_type == "Global":
-                    broadcast(f"{username}: {content}")
-                elif recipient_type == "DM":
-                    send_dm(recipient, f"{username}: {content}")
-                elif recipient_type == "GROUP":
-                    if recipient in groups:
-                        send_group_message(recipient, f"{username}: {content}")
+                try:
+                    _, recipient_type, recipient, content = msg.split(":", 3)
+                    if recipient_type == "Global":
+                        broadcast(f"{username}: {content}")
+                    elif recipient_type == "DM":
+                        send_dm(recipient, f"{username} (DM): {content}")
+                    elif recipient_type == "GROUP":
+                        if recipient in groups:
+                            send_group_message(recipient, f"{username} ({recipient}): {content}")
+                except Exception as e:
+                    print(f"Error processing message: {e}")
+                    traceback.print_exc()
+            
             elif msg.startswith("CREATE_GROUP:") and username:
                 _, group_name = msg.split(":")
-                create_group(group_name, username)
-                client.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
-                send_groups_to_all_clients()  # Notify all clients of the new group
-            elif msg.startswith("JOIN_GROUP:") and username:
-                _, group_name = msg.split(":")
-                join_group(group_name, username)
-                client.send(f"JOINED_GROUP:{group_name}".encode("utf-8"))
+                if create_group(group_name, username):
+                    client.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
+                    send_groups_to_all_clients()
+                else:
+                    client.send(f"GROUP_CREATE_FAIL:{group_name}".encode("utf-8"))
+    
     except Exception as e:
         print(f"Error handling client {addr}: {e}")
+        traceback.print_exc()
+    
     finally:
         # Always clean up after the client
-        if username in clients:
+        if username:
             with clients_lock:
-                del clients[username]
-        client.close()
+                if username in clients:
+                    del clients[username]
+                if username in active_users:
+                    active_users.remove(username)
+                broadcast(f"Server: {username} has left the chat")
+        
+        try:
+            client.close()
+        except:
+            pass
+
+def send_groups_to_client(client):
+    group_list = ":".join(groups.keys())
+    try:
+        client.send(f"UPDATE_GROUPS:{group_list}".encode("utf-8"))
+    except:
+        pass
 
 def send_groups_to_all_clients():
     group_list = ":".join(groups.keys())
@@ -107,18 +145,19 @@ def send_group_message(group_name, message):
             send_dm(user, message)
 
 def create_group(group_name, creator):
-    if group_name not in groups:
+    with clients_lock:
+        # Prevent duplicate group names and invalid names
+        if group_name in groups or not group_name or group_name == "Select Group":
+            return False
+        
         groups[group_name] = [creator]
-    else:
-        if creator not in groups[group_name]:
-            groups[group_name].append(creator)
-
-def join_group(group_name, username):
-    if group_name in groups:
-        if username not in groups[group_name]:
-            groups[group_name].append(username)
+        return True
 
 def register_user(username, password):
+    # Basic input validation
+    if not username or not password:
+        return False
+    
     try:
         conn = sqlite3.connect("users.db")
         c = conn.cursor()
@@ -131,6 +170,10 @@ def register_user(username, password):
         return False
 
 def check_login(username, password):
+    # Basic input validation
+    if not username or not password:
+        return False
+    
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password))
