@@ -1,7 +1,6 @@
 import socket
 import threading
 import sqlite3
-import sys
 
 # Database setup
 def init_db():
@@ -14,20 +13,6 @@ def init_db():
         password TEXT
     )
     """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS groups (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_name TEXT UNIQUE
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS group_members (
-        group_id INTEGER,
-        username TEXT,
-        FOREIGN KEY(group_id) REFERENCES groups(id),
-        FOREIGN KEY(username) REFERENCES users(username)
-    )
-    """)
     conn.commit()
     conn.close()
 
@@ -36,17 +21,19 @@ init_db()
 # Server setup
 HOST = "0.0.0.0"
 PORT = 12345
-clients = {}  # This will store active client connections
-server_socket = None
+clients = {}
+groups = {}
+
+# Thread Lock for safe shared access
+clients_lock = threading.Lock()
 
 def handle_client(client, addr):
     username = None
     try:
         while True:
             msg = client.recv(1024).decode("utf-8")
-            if not msg:
+            if not msg:  # Client disconnected
                 break
-
             if msg.startswith("REGISTER:"):
                 _, user, pwd = msg.split(":")
                 if register_user(user, pwd):
@@ -56,46 +43,95 @@ def handle_client(client, addr):
             elif msg.startswith("LOGIN:"):
                 _, user, pwd = msg.split(":")
                 if check_login(user, pwd):
-                    if user in clients:
-                        client.send("LOGIN_FAIL:ALREADY_LOGGED_IN".encode("utf-8"))
-                    else:
-                        username = user
-                        clients[username] = client  # Add the client to the active user list
-                        client.send("LOGIN_SUCCESS".encode("utf-8"))
+                    with clients_lock:  # Lock to prevent multiple logins
+                        if user in clients:
+                            client.send("ALREADY_LOGGED_IN".encode("utf-8"))
+                        else:
+                            username = user
+                            clients[username] = client
+                            client.send("LOGIN_SUCCESS".encode("utf-8"))
+                            send_user_list()
+                            send_group_list()
                 else:
                     client.send("LOGIN_FAIL".encode("utf-8"))
             elif msg.startswith("MSG:") and username:
-                _, target, content = msg.split(":", 2)
-                if target == "Global":
+                _, recipient_type, recipient, content = msg.split(":", 3)
+                if recipient_type == "Global":
                     broadcast(f"{username}: {content}")
-                elif target.startswith("DM:"):
-                    target_user = target[3:]
-                    send_dm(username, target_user, content)
-                elif target.startswith("GROUP:"):
-                    group_name = target[6:]
-                    send_group_message(group_name, username, content)
+                elif recipient_type == "DM":
+                    send_dm(recipient, f"{username}: {content}")
+                elif recipient_type == "GROUP":
+                    if recipient in groups:
+                        send_group_message(recipient, f"{username}: {content}")
             elif msg.startswith("CREATE_GROUP:") and username:
-                _, group_name = msg.split(":", 1)
+                _, group_name = msg.split(":")
                 create_group(group_name, username)
                 client.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
+                send_group_list()
             elif msg.startswith("JOIN_GROUP:") and username:
-                _, group_name = msg.split(":", 1)
+                _, group_name = msg.split(":")
                 join_group(group_name, username)
                 client.send(f"JOINED_GROUP:{group_name}".encode("utf-8"))
-            elif msg.startswith("USERLIST:"):
-                users = get_user_list()  # Get list of usernames from clients dictionary
-                client.send(f"USERLIST:{','.join(users)}".encode("utf-8"))
-            elif msg.startswith("STOP_SERVER:"):
-                shutdown_server(client)
-                break
-    except ConnectionResetError:
-        print(f"Connection reset by {addr}")
+                send_group_list()
     except Exception as e:
         print(f"Error handling client {addr}: {e}")
     finally:
+        # Always clean up after the client
         if username in clients:
-            del clients[username]  # Remove the user from the active list on disconnect
+            with clients_lock:
+                del clients[username]
         client.close()
+        send_user_list()
+
+def broadcast(message):
+    with clients_lock:
+        for client in clients.values():
+            try:
+                client.send(message.encode("utf-8"))
+            except Exception as e:
+                print(f"Error broadcasting message: {e}")
+
+def send_dm(username, message):
+    with clients_lock:
+        if username in clients:
+            client = clients[username]
+            try:
+                client.send(message.encode("utf-8"))
+            except Exception as e:
+                print(f"Error sending DM to {username}: {e}")
+
+def send_group_message(group_name, message):
+    if group_name in groups:
+        for user in groups[group_name]:
+            send_dm(user, message)
+
+def create_group(group_name, creator):
+    if group_name not in groups:
+        groups[group_name] = [creator]
+    else:
+        if creator not in groups[group_name]:
+            groups[group_name].append(creator)
+
+def join_group(group_name, username):
+    if group_name in groups:
+        if username not in groups[group_name]:
+            groups[group_name].append(username)
+
+def send_user_list():
+    user_list = ",".join(clients.keys())
+    for client in clients.values():
+        try:
+            client.send(f"USER_LIST:{user_list}".encode("utf-8"))
+        except Exception as e:
+            print(f"Error sending user list: {e}")
+
+def send_group_list():
+    group_list = ",".join(groups.keys())
+    for client in clients.values():
+        try:
+            client.send(f"GROUP_LIST:{group_list}".encode("utf-8"))
+        except Exception as e:
+            print(f"Error sending group list: {e}")
 
 def register_user(username, password):
     try:
@@ -106,110 +142,33 @@ def register_user(username, password):
         conn.close()
         return True
     except sqlite3.IntegrityError:
+        # User already exists
         return False
 
 def check_login(username, password):
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password))
-    user = c.fetchone()
+    result = c.fetchone()
     conn.close()
-    return user is not None
+    return result is not None
 
-def broadcast(message):
-    for client in clients.values():
-        try:
-            client.send(message.encode("utf-8"))
-        except:
-            pass
-
-def send_dm(from_user, to_user, message):
-    """Send a direct message to a user."""
-    if to_user in clients:
-        clients[to_user].send(f"DM from {from_user}: {message}".encode("utf-8"))
-    else:
-        print(f"{to_user} is not online!")
-
-def send_group_message(group_name, from_user, message):
-    """Send a message to a group."""
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("""
-    SELECT username FROM group_members
-    INNER JOIN groups ON groups.id = group_members.group_id
-    WHERE groups.group_name = ? AND username != ?
-    """, (group_name, from_user))
-    members = c.fetchall()
-    conn.close()
-
-    if members:
-        for member in members:
-            member_name = member[0]
-            if member_name in clients:
-                clients[member_name].send(f"Group message from {from_user} in {group_name}: {message}".encode("utf-8"))
-
-def create_group(group_name, creator):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO groups (group_name) VALUES (?)", (group_name,))
-    group_id = c.lastrowid
-    c.execute("INSERT INTO group_members (group_id, username) VALUES (?, ?)", (group_id, creator))
-    conn.commit()
-    conn.close()
-
-def join_group(group_name, username):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("SELECT id FROM groups WHERE group_name = ?", (group_name,))
-    group = c.fetchone()
-    if group:
-        group_id = group[0]
-        c.execute("INSERT INTO group_members (group_id, username) VALUES (?, ?)", (group_id, username))
-        conn.commit()
-    conn.close()
-
-def get_user_list():
-    # Return a list of all users currently connected, from the `clients` dictionary
-    return list(clients.keys())
-
-def shutdown_server(client):
-    """Shutdown the server and close all connections."""
-    client.send("Server is shutting down...".encode("utf-8"))
-    print("Server is shutting down...")
-    for c in clients.values():
-        try:
-            c.send("Server is shutting down. Disconnecting...".encode("utf-8"))
-            c.close()
-        except:
-            pass
-    if server_socket:
-        server_socket.close()
-    sys.exit(0)
-
-# Server listening
+# Server loop
 def start_server():
-    global server_socket
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((HOST, PORT))
     server_socket.listen(5)
-    print(f"Server running on {HOST}:{PORT}...")
-    
-    # Server CLI for graceful shutdown
-    threading.Thread(target=server_cli, daemon=True).start()
+    print(f"Server started on {HOST}:{PORT}")
 
-    while True:
-        client, addr = server_socket.accept()
-        print(f"Connection from {addr}")
-        threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
-
-def server_cli():
-    """Handle server CLI input to gracefully shut down the server."""
-    while True:
-        cmd = input("Server CLI (type 'shutdown' to stop server): ").strip()
-        if cmd.lower() == 'shutdown':
-            print("Shutting down server...")
-            shutdown_server(None)
-            break
+    try:
+        while True:
+            client, addr = server_socket.accept()
+            print(f"New connection from {addr}")
+            threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+    except Exception as e:
+        print(f"Server error: {e}")
+    finally:
+        server_socket.close()
 
 if __name__ == "__main__":
     start_server()
