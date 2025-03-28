@@ -1,96 +1,100 @@
 import socket
 import threading
 
-HOST = "0.0.0.0"
-PORT = 12345
+class ChatServer:
+    def __init__(self):
+        self.users = {}  # Store users in a dictionary (username: password)
+        self.clients = {}  # Store client connections (username: client_socket)
+        self.groups = {"Global": []}  # Example: Default group for global chat
+        
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.bind(('0.0.0.0', 12345))
+        self.server_socket.listen(5)
+        print("Server started on port 12345...")
 
-clients = {}  # username -> client_socket
-users = {}  # username -> password
-groups = {"Global": set()}  # group_name -> set of usernames
+    def handle_client(self, client_socket, client_address):
+        try:
+            client_socket.send(b"Welcome to the server!\n")
+            while True:
+                message = client_socket.recv(1024).decode("utf-8")
+                if not message:
+                    break
 
-lock = threading.Lock()
+                print(f"Received message: {message}")
 
-def broadcast(message, group="Global", sender=""):
-    """Send a message to all users in a group."""
-    if group in groups:
-        for user in groups[group]:
-            if user in clients:
+                if message.startswith("LOGIN:"):
+                    self.handle_login(client_socket, message)
+                
+                elif message.startswith("REGISTER:"):
+                    self.handle_register(client_socket, message)
+
+                elif message.startswith("MSG:"):
+                    self.handle_message(client_socket, message)
+
+                elif message.startswith("CREATE_GROUP:"):
+                    self.handle_create_group(client_socket, message)
+
+        except Exception as e:
+            print(f"Error handling client: {e}")
+        finally:
+            client_socket.close()
+
+    def handle_login(self, client_socket, message):
+        _, username, password = message.split(":")
+        
+        if username in self.users and self.users[username] == password:
+            self.clients[username] = client_socket  # Save the client connection
+            client_socket.send("LOGIN_SUCCESS".encode("utf-8"))
+        else:
+            client_socket.send("LOGIN_FAIL".encode("utf-8"))
+
+    def handle_register(self, client_socket, message):
+        _, username, password = message.split(":")
+        
+        if username not in self.users:
+            self.users[username] = password  # Register new user
+            client_socket.send("REGISTER_SUCCESS".encode("utf-8"))
+            print(f"User {username} registered successfully.")
+        else:
+            client_socket.send("REGISTER_FAIL".encode("utf-8"))
+            print(f"Registration failed for {username}: Username already exists.")
+
+    def handle_message(self, client_socket, message):
+        _, target_group, sender, msg = message.split(":", 3)
+
+        if target_group == "Global":
+            self.broadcast_message(f"{sender}: {msg}", "Global")
+        elif target_group in self.groups:
+            self.broadcast_message(f"{sender}: {msg}", target_group)
+        else:
+            client_socket.send("GROUP_NOT_FOUND".encode("utf-8"))
+
+    def broadcast_message(self, message, group_name):
+        if group_name == "Global":
+            # Send to all connected clients in the "Global" chat
+            for username, client_socket in self.clients.items():
                 try:
-                    clients[user].send(f"{sender}: {message}".encode("utf-8"))
-                except:
-                    del clients[user]
+                    client_socket.send(message.encode("utf-8"))
+                except Exception as e:
+                    print(f"Error sending message to {username}: {e}")
 
-def handle_client(client_socket):
-    """Handles client connection."""
-    username = None
-    try:
+    def handle_create_group(self, client_socket, message):
+        _, group_name = message.split(":")
+        
+        if group_name not in self.groups:
+            self.groups[group_name] = []  # Create new group
+            client_socket.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
+            print(f"Group {group_name} created successfully.")
+        else:
+            client_socket.send("GROUP_EXISTS".encode("utf-8"))
+            print(f"Group {group_name} already exists.")
+
+    def start(self):
         while True:
-            data = client_socket.recv(1024).decode("utf-8")
-            if not data:
-                break
-
-            parts = data.split(":")
-            command = parts[0]
-
-            if command == "LOGIN":
-                username, password = parts[1], parts[2]
-                if username in users and users[username] == password:
-                    with lock:
-                        clients[username] = client_socket
-                        groups["Global"].add(username)
-                    client_socket.send("LOGIN_SUCCESS".encode("utf-8"))
-                else:
-                    client_socket.send("LOGIN_FAIL".encode("utf-8"))
-
-            elif command == "REGISTER":
-                username, password = parts[1], parts[2]
-                if username in users:
-                    client_socket.send("REGISTER_FAIL".encode("utf-8"))
-                else:
-                    users[username] = password
-                    client_socket.send("REGISTER_SUCCESS".encode("utf-8"))
-
-            elif command == "MSG":
-                msg_type, recipient, message = parts[1], parts[2], ":".join(parts[3:])
-                if msg_type == "DM":
-                    if recipient in clients:
-                        clients[recipient].send(f"[DM] {username}: {message}".encode("utf-8"))
-                elif msg_type == "GROUP":
-                    broadcast(message, group=recipient, sender=username)
-                else:
-                    broadcast(message, sender=username)
-
-            elif command == "CREATE_GROUP":
-                group_name = parts[1]
-                if group_name not in groups:
-                    groups[group_name] = set()
-                    client_socket.send(f"GROUP_CREATED:{group_name}".encode("utf-8"))
-                else:
-                    client_socket.send("GROUP_EXISTS".encode("utf-8"))
-
-    except:
-        pass
-
-    finally:
-        if username:
-            with lock:
-                if username in clients:
-                    del clients[username]
-                for group in groups.values():
-                    if username in group:
-                        group.remove(username)
-        client_socket.close()
-
-def start_server():
-    """Starts the server."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((HOST, PORT))
-    server.listen(5)
-    print(f"Server started on {HOST}:{PORT}")
-
-    while True:
-        client_socket, _ = server.accept()
-        threading.Thread(target=handle_client, args=(client_socket,), daemon=True).start()
+            client_socket, client_address = self.server_socket.accept()
+            print(f"New connection: {client_address}")
+            threading.Thread(target=self.handle_client, args=(client_socket, client_address)).start()
 
 if __name__ == "__main__":
-    start_server()
+    server = ChatServer()
+    server.start()
